@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         planets.nu Minefield Simulation
 // @namespace    planets-minefield-simulation
-// @version      0.1.1
+// @version      0.1.2
 // @description  Draws simulated minefield sizes on the planets.nu star map. Nothing is sent to the game.
 // @license      Apache-2.0
 // @match        https://planets.nu/*
@@ -97,9 +97,11 @@
 
     // Existing minefields that cover the point, and the one the host would grow:
     // the closest own field of the same kind that covers the point.
+    // On sphere maps the client adds wrap-around copies with negative ids
+    // (vgap.sphereClone); only the originals (id > 0) are real fields.
     function fieldsAt(x, y) {
         const fields = (vgap.minefields || [])
-            .filter((mf) => mf.units > 0 && distance(x, y, mf.x, mf.y) <= mf.radius)
+            .filter((mf) => mf.id > 0 && mf.units > 0 && distance(x, y, mf.x, mf.y) <= mf.radius)
             .map((mf) => ({ mf, dist: distance(x, y, mf.x, mf.y) }));
         let hostChoice = null;
         for (const f of fields) {

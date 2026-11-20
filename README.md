@@ -48,3 +48,7 @@ Taken from the planets.nu client (`nu.js`, `LayMinefield`, `minefieldRadius`):
 - laying inside an existing field adds the mines to that field
 
 Not simulated: hidden mines, mine decay over turns, `md*` friendly codes.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

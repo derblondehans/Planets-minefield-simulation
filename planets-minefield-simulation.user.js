@@ -3,6 +3,7 @@
 // @namespace    planets-minefield-simulation
 // @version      0.1.1
 // @description  Draws simulated minefield sizes on the planets.nu star map. Nothing is sent to the game.
+// @license      Apache-2.0
 // @match        https://planets.nu/*
 // @run-at       document-idle
 // @grant        none

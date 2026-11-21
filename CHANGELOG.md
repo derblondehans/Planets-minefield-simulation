@@ -6,6 +6,30 @@ script's header; each version is tagged in Git as `vX.Y.Z`.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-21
+
+### Added
+
+- A field next to *All circles in steps of 10 torpedoes* for the maximum
+  number of torpedoes, 250 by default. The circles stop there even when the
+  field has not reached its max size. A maximum that is not a multiple of 10
+  gets its own last circle.
+- A color choice above the *Draw* button: *Random* (the default) or one of 10
+  colors.
+
+### Changed
+
+- *Random* picks a palette color that no simulation uses yet, so two
+  simulations no longer get the same color after one was removed.
+
+### Security
+
+- Every value written into the panel's HTML is escaped, also the color and id
+  of a simulation and the torpedo id.
+- Simulations loaded from the browser's storage are checked first: entries
+  without the expected shape are dropped, and a color that is not a hex color
+  is replaced by a palette color.
+
 ## [0.2.0] - 2026-11-21
 
 ### Fixed
@@ -53,6 +77,7 @@ First published version.
 - Simulations are kept per game in the browser and can be removed one by one
   or all at once.
 
+[0.3.0]: https://github.com/derblondehans/Planets-minefield-simulation/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/derblondehans/Planets-minefield-simulation/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/derblondehans/Planets-minefield-simulation/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/derblondehans/Planets-minefield-simulation/releases/tag/v0.1.1

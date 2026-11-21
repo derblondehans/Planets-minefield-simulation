@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         planets.nu Minefield Simulation
 // @namespace    planets-minefield-simulation
-// @version      0.2.0
+// @version      0.3.0
 // @description  Draws simulated minefield sizes on the planets.nu star map. Nothing is sent to the game.
 // @license      Apache-2.0
 // @match        https://planets.nu/*
@@ -25,13 +25,26 @@
     const PLUGIN_NAME = "MinefieldSimulation";
     const STORAGE_PREFIX = "planets-minefield-simulation:";
     const ADV_LAY_LARGE_MINEFIELDS = 48;
-    const COLORS = ["#ffcc00", "#00e5ff", "#ff5cf0", "#7cff5c", "#ff8a3d", "#b18cff"];
+    const COLORS = [
+        { name: "Red", value: "#ff3b30" },
+        { name: "Orange", value: "#ff9500" },
+        { name: "Yellow", value: "#ffcc00" },
+        { name: "Green", value: "#34c759" },
+        { name: "Cyan", value: "#00e5ff" },
+        { name: "Blue", value: "#3d8bff" },
+        { name: "Purple", value: "#af52de" },
+        { name: "Pink", value: "#ff5cf0" },
+        { name: "Brown", value: "#b5835a" },
+        { name: "White", value: "#ffffff" },
+    ];
+    const RANDOM_COLOR = "random";
 
     let simulations = [];
     let pick = "off"; // "off" | "armed" (waiting for a press) | "pressed" (waiting for the release)
     let pickPoint = null; // map point of the caught press
     let swallowClickUntil = 0; // catch the browser's click event shortly after a caught release
     let compatible = true; // false when the client lacks something the script needs
+    let colorChoice = RANDOM_COLOR; // RANDOM_COLOR or a color value from COLORS
     let panel = null;
     let currentLocation = null; // { x, y, label }
 
@@ -192,13 +205,44 @@
         return STORAGE_PREFIX + (game.gameId() || "unknown");
     }
 
+    // Stored data is not trusted: it may come from an older version or have
+    // been changed by hand. Keeps only simulations with the expected shape and
+    // returns them as fresh objects; a color that is not a hex color is
+    // replaced by a palette color.
+    function cleanSimulation(sim, index) {
+        const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+        if (!sim || typeof sim !== "object") return null;
+        if (!isNum(sim.id) || !isNum(sim.x) || !isNum(sim.y)) return null;
+        if (!Array.isArray(sim.circles) || sim.circles.length === 0) return null;
+        const circles = [];
+        for (const c of sim.circles) {
+            if (!c || !isNum(c.torps) || !isNum(c.units) || !isNum(c.radius)) return null;
+            circles.push({ torps: c.torps, units: c.units, radius: c.radius, capped: c.capped === true });
+        }
+        return {
+            id: sim.id,
+            x: sim.x,
+            y: sim.y,
+            color: typeof sim.color === "string" && /^#[0-9a-f]{6}$/i.test(sim.color)
+                ? sim.color : COLORS[index % COLORS.length].value,
+            label: String(sim.label ?? "Point"),
+            torpName: String(sim.torpName ?? "Torpedo"),
+            unitsPerTorp: isNum(sim.unitsPerTorp) ? sim.unitsPerTorp : 0,
+            baseUnits: isNum(sim.baseUnits) ? sim.baseUnits : 0,
+            baseFieldId: isNum(sim.baseFieldId) ? sim.baseFieldId : null,
+            circles,
+        };
+    }
+
     function loadSimulations() {
+        let stored = [];
         try {
             const raw = localStorage.getItem(storageKey());
-            simulations = raw ? JSON.parse(raw) : [];
+            stored = raw ? JSON.parse(raw) : [];
         } catch (e) {
-            simulations = [];
+            stored = [];
         }
+        simulations = Array.isArray(stored) ? stored.map(cleanSimulation).filter(Boolean) : [];
     }
 
     function saveSimulations() {
@@ -253,14 +297,27 @@
         return circles;
     }
 
-    function stepCounts(baseUnits, unitsPerTorp, maxUnits) {
+    // Torpedo counts in steps of 10, up to maxTorps or until the field reaches
+    // its max size. A maxTorps that is not a multiple of 10 is the last step.
+    function stepCounts(baseUnits, unitsPerTorp, maxUnits, maxTorps) {
         const counts = [];
         const cap = Math.max(maxUnits, baseUnits);
-        for (let torps = 10; torps <= 10000; torps += 10) {
+        for (let step = 10; step < maxTorps + 10; step += 10) {
+            const torps = Math.min(step, maxTorps);
             counts.push(torps);
             if (baseUnits + torps * unitsPerTorp >= cap) break;
         }
         return counts;
+    }
+
+    // The chosen color, or a random palette color that no simulation uses yet
+    // (any palette color once all are in use).
+    function nextColor() {
+        if (colorChoice !== RANDOM_COLOR) return colorChoice;
+        const used = new Set(simulations.map((s) => s.color));
+        const unused = COLORS.filter((c) => !used.has(c.value));
+        const pool = unused.length ? unused : COLORS;
+        return pool[Math.floor(Math.random() * pool.length)].value;
     }
 
     function createSimulation() {
@@ -287,7 +344,12 @@
 
         let counts;
         if (mode === "steps") {
-            counts = stepCounts(baseUnits, unitsPerTorp, maxUnits);
+            const maxTorps = parseInt(panel.querySelector("#mfs-steps-max").value, 10);
+            if (!(maxTorps > 0)) {
+                msg.textContent = "Enter a maximum number of torpedoes above 0.";
+                return;
+            }
+            counts = stepCounts(baseUnits, unitsPerTorp, maxUnits, maxTorps);
         } else {
             const torps = parseInt(panel.querySelector("#mfs-count").value, 10);
             if (!(torps > 0)) {
@@ -302,7 +364,7 @@
             id: Date.now(),
             x,
             y,
-            color: COLORS[simulations.length % COLORS.length],
+            color: nextColor(),
             label: currentLocation.label,
             torpName: torp ? torp.name : "Torpedo " + torpId,
             unitsPerTorp,
@@ -487,9 +549,9 @@
                 ? sim.circles.length + " circles up to " + last.torps + "T / " + last.radius + " ly"
                 : last.torps + "T → " + last.units + " mines, " + last.radius + " ly";
             const base = sim.baseFieldId !== null ? ", adds to field #" + sim.baseFieldId : "";
-            return "<div class='mfs-item'><span class='mfs-swatch' style='background:" + sim.color + "'></span>" +
-                "<span>" + escapeHtml(sim.label) + ", " + escapeHtml(sim.torpName) + base + ": " + escapeHtml(what) + "</span>" +
-                "<button data-remove='" + sim.id + "' title='Remove'>✕</button></div>";
+            return "<div class='mfs-item'><span class='mfs-swatch' style='background:" + escapeHtml(sim.color) + "'></span>" +
+                "<span>" + escapeHtml(sim.label) + ", " + escapeHtml(sim.torpName) + escapeHtml(base) + ": " + escapeHtml(what) + "</span>" +
+                "<button data-remove='" + escapeHtml(sim.id) + "' title='Remove'>✕</button></div>";
         }).join("");
     }
 
@@ -497,7 +559,7 @@
         const select = panel.querySelector("#mfs-torp");
         const previous = select.value;
         const list = game.torpedoes();
-        select.innerHTML = list.map((t) => "<option value='" + t.id + "'>" + escapeHtml(t.name) + " (" + t.id * t.id + " mines/torp)</option>").join("");
+        select.innerHTML = list.map((t) => "<option value='" + escapeHtml(t.id) + "'>" + escapeHtml(t.name) + " (" + escapeHtml(t.id * t.id) + " mines/torp)</option>").join("");
         if (previous && list.some((t) => String(t.id) === previous)) select.value = previous;
         else if (list.length) select.value = String(list[list.length - 1].id);
     }
@@ -554,6 +616,10 @@
 #mfs-panel .mfs-item button { padding: 0 5px; }
 #mfs-panel .mfs-swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 #mfs-panel button:disabled { opacity: 0.4; cursor: default; }
+#mfs-panel .mfs-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+#mfs-panel button.mfs-color { width: 18px; height: 18px; padding: 0; border: 2px solid transparent; border-radius: 50%; }
+#mfs-panel button.mfs-color-random { width: auto; border-radius: 9px; padding: 0 6px; line-height: 14px; }
+#mfs-panel button.mfs-color.mfs-selected { border-color: #fff; box-shadow: 0 0 0 1px #000; }
 #mfs-message { color: #ff7b7b; min-height: 14px; }
 #mfs-compat { display: none; color: #ff7b7b; border: 1px solid #ff7b7b; border-radius: 3px; padding: 4px; margin-bottom: 8px; }
 `;
@@ -597,9 +663,17 @@
 </div>
 <div class="mfs-section">
   <div class="mfs-label">Torpedoes</div>
-  <label class="mfs-row"><input type="radio" name="mfs-mode" value="steps" checked> All circles in steps of 10 torpedoes</label>
+  <label class="mfs-row"><input type="radio" name="mfs-mode" value="steps" checked> All circles in steps of 10 torpedoes, up to
+    <input type="number" id="mfs-steps-max" min="1" value="250" style="width:60px"></label>
   <label class="mfs-row"><input type="radio" name="mfs-mode" value="manual"> Number of torpedoes:
     <input type="number" id="mfs-count" min="1" value="50" style="width:70px"></label>
+</div>
+<div class="mfs-section">
+  <div class="mfs-label">Color</div>
+  <div id="mfs-colors" class="mfs-colors">
+    <button type="button" class="mfs-color mfs-color-random mfs-selected" data-color="${RANDOM_COLOR}" title="Random color">Random</button>
+    ${COLORS.map((c) => `<button type="button" class="mfs-color" data-color="${c.value}" title="${c.name}" style="background:${c.value}"></button>`).join("")}
+  </div>
 </div>
 <div class="mfs-section">
   <button id="mfs-draw">Draw</button>
@@ -630,8 +704,18 @@
         panel.querySelector("#mfs-loc-value").addEventListener("keydown", (e) => {
             if (e.key === "Enter") locationFromInputs();
         });
+        panel.querySelector("#mfs-steps-max").addEventListener("focus", () => {
+            panel.querySelector("input[name=mfs-mode][value=steps]").checked = true;
+        });
         panel.querySelector("#mfs-count").addEventListener("focus", () => {
             panel.querySelector("input[name=mfs-mode][value=manual]").checked = true;
+        });
+        panel.querySelector("#mfs-colors").addEventListener("click", (e) => {
+            const button = e.target.closest && e.target.closest("button[data-color]");
+            if (!button) return;
+            colorChoice = button.getAttribute("data-color");
+            for (const b of panel.querySelectorAll("#mfs-colors button"))
+                b.classList.toggle("mfs-selected", b === button);
         });
         panel.querySelector("#mfs-draw").addEventListener("click", createSimulation);
         panel.querySelector("#mfs-clear").addEventListener("click", () => {

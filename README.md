@@ -27,10 +27,12 @@ Desktop interface only.
    Tick *Robots (4× mines)* to simulate the Robot bonus; it is off by default
    and never set automatically. The *max field size* is preset from your race
    and can be changed.
-4. **Torpedoes**: either *all circles in steps of 10 torpedoes* (up to the max
-   field size), or one circle for a given number of torpedoes.
-5. Press **Draw**. Each simulation gets its own color; circles are dashed and
-   labeled with torpedoes and radius. Remove simulations one by one or all at
+4. **Torpedoes**: either *all circles in steps of 10 torpedoes* up to a
+   maximum number of torpedoes (250 by default; the circles also stop at the
+   max field size), or one circle for a given number of torpedoes.
+5. **Color**: *Random* (the default) gives each simulation a palette color no
+   other simulation uses yet; or choose one of the 10 colors yourself.
+6. Press **Draw**. Circles are dashed and labeled with torpedoes and radius. Remove simulations one by one or all at
    once.
 
 Simulations are kept per game in the browser's `localStorage`. A simulation

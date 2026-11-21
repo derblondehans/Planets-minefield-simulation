@@ -49,6 +49,28 @@ Taken from the planets.nu client (`nu.js`, `LayMinefield`, `minefieldRadius`):
 
 Not simulated: hidden mines, mine decay over turns, `md*` friendly codes.
 
+## When planets.nu changes
+
+The script uses internal parts of the planets.nu client, not a public API. All
+of them are in one place in the script (the *game adapter*). When a game opens,
+the script checks that they are all there. If the client has changed, the panel
+says what is missing and the simulation turns itself off instead of drawing
+wrong circles.
+
+## Versions
+
+The changes in each version are in [CHANGELOG.md](CHANGELOG.md). Every version
+is tagged in Git as `vX.Y.Z`. To see which version you have installed, look at
+`@version` in the script in the Tampermonkey dashboard.
+
+To release a new version:
+
+1. Raise `@version` in the script's header.
+2. Add the version with its date and changes at the top of `CHANGELOG.md`, and
+   its compare link at the bottom.
+3. Commit, then tag the commit: `git tag -a vX.Y.Z -m "<the version's notes>"`.
+4. Push the commit and the tag: `git push && git push origin vX.Y.Z`.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

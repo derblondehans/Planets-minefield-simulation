@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         planets.nu Minefield Simulation
 // @namespace    planets-minefield-simulation
-// @version      0.1.2
+// @version      0.2.0
 // @description  Draws simulated minefield sizes on the planets.nu star map. Nothing is sent to the game.
 // @license      Apache-2.0
 // @match        https://planets.nu/*
@@ -28,19 +28,168 @@
     const COLORS = ["#ffcc00", "#00e5ff", "#ff5cf0", "#7cff5c", "#ff8a3d", "#b18cff"];
 
     let simulations = [];
-    let pickMode = false;
+    let pick = "off"; // "off" | "armed" (waiting for a press) | "pressed" (waiting for the release)
+    let pickPoint = null; // map point of the caught press
+    let swallowClickUntil = 0; // catch the browser's click event shortly after a caught release
+    let compatible = true; // false when the client lacks something the script needs
     let panel = null;
     let currentLocation = null; // { x, y, label }
 
+    // ---------- game adapter ----------
+    // The only place that touches the planets.nu client (vgap). All of it is
+    // the client's internal code, not a public API, so a client update may
+    // change it. missingFeatures() names what the script needs and no longer
+    // finds; the script then turns itself off instead of failing silently.
+    // On sphere maps the client adds wrap-around copies of objects with the
+    // negative id of the original (vgap.sphereClone); the adapter always
+    // returns the originals.
+
+    const isFn = (f) => typeof f === "function";
+
+    const REQUIRED_FEATURES = [
+        ["vgap.registerPlugin", () => isFn(vgap.registerPlugin)],
+        ["vgap.map.draw", () => isFn(vgap.map.draw)],
+        ["vgap.map.screenX / screenY", () => isFn(vgap.map.screenX) && isFn(vgap.map.screenY)],
+        ["vgap.map.mapX / mapY", () => isFn(vgap.map.mapX) && isFn(vgap.map.mapY)],
+        ["vgap.map.zoom", () => typeof vgap.map.zoom === "number"],
+        ["vgap.map.ctx", () => !!vgap.map.ctx && isFn(vgap.map.ctx.arc)],
+        ["vgap.map.canvas", () => vgap.map.canvas instanceof HTMLCanvasElement],
+        ["vgap.minefields", () => Array.isArray(vgap.minefields)],
+        ["vgap.torpedos", () => Array.isArray(vgap.torpedos)],
+        ["vgap.planets", () => Array.isArray(vgap.planets)],
+        ["vgap.getPlanet / getShip", () => isFn(vgap.getPlanet) && isFn(vgap.getShip)],
+    ];
+
+    const game = {
+        // The client script has loaded and plugins can be registered.
+        loaded() {
+            return typeof vgap !== "undefined" && !!vgap && isFn(vgap.registerPlugin);
+        },
+
+        // A game is open and its map exists.
+        ready() {
+            return game.loaded() && !!vgap.map && !!vgap.map.ctx && !!vgap.player && vgap.player.id > 0;
+        },
+
+        missingFeatures() {
+            return REQUIRED_FEATURES.filter(([, test]) => {
+                try {
+                    return !test();
+                } catch (e) {
+                    return true;
+                }
+            }).map(([name]) => name);
+        },
+
+        gameId() {
+            return vgap.game && vgap.game.id ? vgap.game.id : null;
+        },
+
+        playerId() {
+            return vgap.player.id;
+        },
+
+        registerPlugin(hooks, name) {
+            vgap.registerPlugin(hooks, name);
+        },
+
+        redraw() {
+            vgap.map.draw();
+        },
+
+        context() {
+            return vgap.map.ctx;
+        },
+
+        zoom() {
+            return vgap.map.zoom;
+        },
+
+        // Map coordinates (ly) to canvas pixels.
+        toScreen(x, y) {
+            return { x: vgap.map.screenX(x), y: vgap.map.screenY(y) };
+        },
+
+        // Mouse position to map coordinates, the way the client does it (map.showInfo).
+        toMap(clientX, clientY) {
+            return { x: Math.round(vgap.map.mapX(clientX)), y: Math.round(vgap.map.mapY(clientY)) };
+        },
+
+        isMapCanvas(target) {
+            return target === vgap.map.canvas;
+        },
+
+        // The planet or ship the client would pick at this map point, or null.
+        objectAt(x, y) {
+            let hit = null;
+            try {
+                hit = isFn(vgap.map.checkForHit) ? vgap.map.checkForHit(x, y) : vgap.map.over;
+            } catch (e) {
+                hit = vgap.map.over;
+            }
+            if (!hit) return null;
+            if (hit.isPlanet) return game.planet(Math.abs(hit.id));
+            if (hit.hullid) return game.ship(Math.abs(hit.id));
+            return null;
+        },
+
+        planet(id) {
+            const p = vgap.getPlanet(id);
+            return p ? { kind: "planet", id: p.id, name: p.name, x: p.x, y: p.y } : null;
+        },
+
+        planetByName(name) {
+            const wanted = name.toLowerCase();
+            const p = vgap.planets.find((pl) => pl.id > 0 && pl.name && pl.name.toLowerCase() === wanted);
+            return p ? game.planet(p.id) : null;
+        },
+
+        ship(id) {
+            const s = vgap.getShip(id);
+            return s ? { kind: "ship", id: s.id, name: s.name, x: s.x, y: s.y } : null;
+        },
+
+        // Real minefields only: no sphere copies, no empty fields.
+        minefields() {
+            return vgap.minefields
+                .filter((mf) => mf.id > 0 && mf.units > 0)
+                .map((mf) => ({ id: mf.id, ownerid: mf.ownerid, x: mf.x, y: mf.y, units: mf.units, radius: mf.radius, isweb: !!mf.isweb }));
+        },
+
+        minefield(id) {
+            return game.minefields().find((mf) => mf.id === id) || null;
+        },
+
+        torpedoes() {
+            return vgap.torpedos.map((t) => ({ id: t.id, name: t.name })).sort((a, b) => a.id - b.id);
+        },
+
+        playerLabel(ownerId) {
+            if (ownerId === vgap.player.id) return "you";
+            const player = isFn(vgap.getPlayer) ? vgap.getPlayer(ownerId) : null;
+            if (!player) return "player " + ownerId;
+            const race = isFn(vgap.getRace) ? vgap.getRace(player.raceid) : null;
+            return (race && race.shortname ? race.shortname : "player") + " (" + ownerId + ")";
+        },
+
+        hasLargeMinefields() {
+            try {
+                return isFn(vgap.advActive) && !!vgap.advActive(ADV_LAY_LARGE_MINEFIELDS);
+            } catch (e) {
+                return false;
+            }
+        },
+
+        distance(x1, y1, x2, y2) {
+            if (isFn(vgap.getSphereDistance)) return vgap.getSphereDistance(x1, y1, x2, y2);
+            return Math.sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
+        },
+    };
+
     // ---------- helpers ----------
 
-    function gameReady() {
-        return typeof vgap !== "undefined" && vgap && vgap.map && vgap.map.ctx && vgap.player && vgap.player.id > 0;
-    }
-
     function storageKey() {
-        const gameId = vgap.game && vgap.game.id ? vgap.game.id : "unknown";
-        return STORAGE_PREFIX + gameId;
+        return STORAGE_PREFIX + (game.gameId() || "unknown");
     }
 
     function loadSimulations() {
@@ -64,31 +213,12 @@
         return Math.min(150, Math.floor(Math.sqrt(units)));
     }
 
-    function distance(x1, y1, x2, y2) {
-        if (typeof vgap.getSphereDistance === "function")
-            return vgap.getSphereDistance(x1, y1, x2, y2);
-        return Math.sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
-    }
-
-    function playerName(ownerId) {
-        if (ownerId === vgap.player.id) return "you";
-        const player = vgap.getPlayer ? vgap.getPlayer(ownerId) : null;
-        if (!player) return "player " + ownerId;
-        const race = vgap.getRace ? vgap.getRace(player.raceid) : null;
-        return (race && race.shortname ? race.shortname : "player") + " (" + ownerId + ")";
-    }
-
-    function torpedoes() {
-        return (vgap.torpedos || []).slice().sort((a, b) => a.id - b.id);
-    }
-
     function defaultMaxUnits() {
-        try {
-            if (vgap.advActive && vgap.advActive(ADV_LAY_LARGE_MINEFIELDS)) return 22500;
-        } catch (e) {
-            // Fall through to the normal limit.
-        }
-        return 10000;
+        return game.hasLargeMinefields() ? 22500 : 10000;
+    }
+
+    function objectLabel(obj) {
+        return (obj.kind === "planet" ? "Planet " : "Ship ") + obj.id + " " + obj.name;
     }
 
     function escapeHtml(text) {
@@ -97,15 +227,13 @@
 
     // Existing minefields that cover the point, and the one the host would grow:
     // the closest own field of the same kind that covers the point.
-    // On sphere maps the client adds wrap-around copies with negative ids
-    // (vgap.sphereClone); only the originals (id > 0) are real fields.
     function fieldsAt(x, y) {
-        const fields = (vgap.minefields || [])
-            .filter((mf) => mf.id > 0 && mf.units > 0 && distance(x, y, mf.x, mf.y) <= mf.radius)
-            .map((mf) => ({ mf, dist: distance(x, y, mf.x, mf.y) }));
+        const fields = game.minefields()
+            .map((mf) => ({ mf, dist: game.distance(x, y, mf.x, mf.y) }))
+            .filter((f) => f.dist <= f.mf.radius);
         let hostChoice = null;
         for (const f of fields) {
-            if (f.mf.ownerid === vgap.player.id && !f.mf.isweb && (!hostChoice || f.dist < hostChoice.dist))
+            if (f.mf.ownerid === game.playerId() && !f.mf.isweb && (!hostChoice || f.dist < hostChoice.dist))
                 hostChoice = f;
         }
         return { fields, hostChoice: hostChoice ? hostChoice.mf : null };
@@ -151,7 +279,7 @@
         let base = null;
         const choice = panel.querySelector("input[name=mfs-field]:checked");
         if (choice && choice.value !== "new")
-            base = (vgap.minefields || []).find((mf) => String(mf.id) === choice.value) || null;
+            base = game.minefield(parseInt(choice.value, 10));
 
         const baseUnits = base ? base.units : 0;
         const x = base ? base.x : currentLocation.x;
@@ -169,7 +297,7 @@
             counts = [torps];
         }
 
-        const torp = torpedoes().find((t) => t.id === torpId);
+        const torp = game.torpedoes().find((t) => t.id === torpId);
         simulations.push({
             id: Date.now(),
             x,
@@ -190,20 +318,19 @@
     // ---------- drawing ----------
 
     function redraw() {
-        if (gameReady()) vgap.map.draw();
+        if (compatible && game.ready()) game.redraw();
     }
 
     function drawSimulations() {
-        if (!gameReady() || simulations.length === 0) return;
-        const map = vgap.map;
-        const ctx = map.ctx;
+        if (!compatible || !game.ready() || simulations.length === 0) return;
+        const ctx = game.context();
+        const zoom = game.zoom();
         ctx.save();
         ctx.font = "11px Arial, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
         for (const sim of simulations) {
-            const sx = map.screenX(sim.x);
-            const sy = map.screenY(sim.y);
+            const { x: sx, y: sy } = game.toScreen(sim.x, sim.y);
             ctx.strokeStyle = sim.color;
             ctx.fillStyle = sim.color;
 
@@ -219,7 +346,7 @@
 
             ctx.setLineDash([5, 4]);
             for (const c of sim.circles) {
-                const r = c.radius * map.zoom;
+                const r = c.radius * zoom;
                 if (r < 1) continue;
                 ctx.beginPath();
                 ctx.arc(sx, sy, r, 0, Math.PI * 2, false);
@@ -255,7 +382,7 @@
             const mf = f.mf;
             const checked = hostChoice && hostChoice.id === mf.id ? " checked" : "";
             html += "<label class='mfs-row'><input type='radio' name='mfs-field' value='" + escapeHtml(mf.id) + "'" + checked + ">" +
-                "Field #" + escapeHtml(mf.id) + " of " + escapeHtml(playerName(mf.ownerid)) + (mf.isweb ? ", web" : "") +
+                "Field #" + escapeHtml(mf.id) + " of " + escapeHtml(game.playerLabel(mf.ownerid)) + (mf.isweb ? ", web" : "") +
                 ": " + escapeHtml(mf.units) + " mines, " + escapeHtml(mf.radius) + " ly" +
                 (hostChoice && hostChoice.id === mf.id ? " <i>(the host would grow this one)</i>" : "") + "</label>";
         }
@@ -270,15 +397,13 @@
         const value = panel.querySelector("#mfs-loc-value").value.trim();
         if (kind === "planet") {
             const id = parseInt(value, 10);
-            const planet = !isNaN(id) && String(id) === value
-                ? vgap.getPlanet(id)
-                : (vgap.planets || []).find((p) => p.name && p.name.toLowerCase() === value.toLowerCase());
+            const planet = !isNaN(id) && String(id) === value ? game.planet(id) : game.planetByName(value);
             if (!planet) return (msg.textContent = "Planet not found.");
-            setLocation(planet.x, planet.y, "Planet " + planet.id + " " + planet.name);
+            setLocation(planet.x, planet.y, objectLabel(planet));
         } else if (kind === "ship") {
-            const ship = vgap.getShip(parseInt(value, 10));
+            const ship = game.ship(parseInt(value, 10));
             if (!ship) return (msg.textContent = "Ship not found.");
-            setLocation(ship.x, ship.y, "Ship " + ship.id + " " + ship.name);
+            setLocation(ship.x, ship.y, objectLabel(ship));
         } else {
             const parts = value.split(/[\s,;]+/).map((v) => parseInt(v, 10));
             if (parts.length !== 2 || parts.some(isNaN)) return (msg.textContent = "Enter coordinates as x, y.");
@@ -286,33 +411,66 @@
         }
     }
 
+    function setPickButton(active) {
+        const button = panel.querySelector("#mfs-pick");
+        button.textContent = active ? "Click on the map…" : "Pick on map";
+        button.classList.toggle("mfs-active", active);
+    }
+
     function startPick() {
-        pickMode = true;
-        panel.querySelector("#mfs-pick").textContent = "Click on the map…";
-        panel.querySelector("#mfs-pick").classList.add("mfs-active");
+        pick = "armed";
+        setPickButton(true);
     }
 
+    // A press already caught stays caught until its release (see onMapMouse).
     function stopPick() {
-        pickMode = false;
-        panel.querySelector("#mfs-pick").textContent = "Pick on map";
-        panel.querySelector("#mfs-pick").classList.remove("mfs-active");
+        if (pick === "armed") pick = "off";
+        setPickButton(false);
     }
 
-    // Catches the next click on the map before the game sees it, so the game
-    // neither selects an object nor starts panning.
-    function onMapMouse(event) {
-        if (!pickMode || !gameReady() || event.target !== vgap.map.canvas) return;
+    function swallow(event) {
         event.stopPropagation();
         event.preventDefault();
-        if (event.type !== "mousedown") return;
-        const x = vgap.map.mapX(event.clientX);
-        const y = vgap.map.mapY(event.clientY);
-        // vgap.map.over is the planet or ship the game found under the mouse.
-        const over = vgap.map.over;
-        stopPick();
-        if (over && over.isPlanet) setLocation(over.x, over.y, "Planet " + over.id + " " + over.name);
-        else if (over && over.hullid) setLocation(over.x, over.y, "Ship " + over.id + " " + over.name);
-        else setLocation(x, y, "Point");
+    }
+
+    // Takes one whole click on the map away from the game. The client treats a
+    // mouseup near its mousedown as a click on the map (map.mouseup calls
+    // map.click), so the press, the release and the browser's click event are
+    // all caught before the game's handlers on the canvas see them; otherwise
+    // the game would select the object under the mouse or start panning.
+    function onMapMouse(event) {
+        if (event.type === "mousedown") swallowClickUntil = 0;
+        if (event.type === "click" && Date.now() < swallowClickUntil && !panel.contains(event.target)) {
+            swallowClickUntil = 0;
+            swallow(event);
+            return;
+        }
+        if (pick === "off" || !compatible || !game.ready()) return;
+
+        if (pick === "pressed") {
+            // The release may happen outside the canvas; finish the pick anyway.
+            if (event.type !== "mouseup") return;
+            swallow(event);
+            pick = "off";
+            swallowClickUntil = Date.now() + 500;
+            finishPick();
+            return;
+        }
+
+        // pick === "armed"
+        if (!game.isMapCanvas(event.target)) return;
+        swallow(event);
+        if (event.type === "mousedown" && event.button === 0) {
+            pickPoint = game.toMap(event.clientX, event.clientY);
+            pick = "pressed";
+        }
+    }
+
+    function finishPick() {
+        setPickButton(false);
+        const obj = game.objectAt(pickPoint.x, pickPoint.y);
+        if (obj) setLocation(obj.x, obj.y, objectLabel(obj));
+        else setLocation(pickPoint.x, pickPoint.y, "Point");
     }
 
     // ---------- panel ----------
@@ -338,13 +496,32 @@
     function fillTorpedoes() {
         const select = panel.querySelector("#mfs-torp");
         const previous = select.value;
-        const list = torpedoes();
+        const list = game.torpedoes();
         select.innerHTML = list.map((t) => "<option value='" + t.id + "'>" + escapeHtml(t.name) + " (" + t.id * t.id + " mines/torp)</option>").join("");
         if (previous && list.some((t) => String(t.id) === previous)) select.value = previous;
         else if (list.length) select.value = String(list[list.length - 1].id);
     }
 
+    // Turns the script off, with a notice in the panel, when the client lacks
+    // something it needs (see the game adapter).
+    function checkCompatibility() {
+        const missing = game.missingFeatures();
+        compatible = missing.length === 0;
+        const notice = panel.querySelector("#mfs-compat");
+        notice.style.display = compatible ? "none" : "block";
+        notice.textContent = compatible ? "" :
+            "The planets.nu client has changed: " + missing.join(", ") + " not found. The simulation is turned off until the script is updated.";
+        for (const id of ["#mfs-pick", "#mfs-loc-set", "#mfs-draw"])
+            panel.querySelector(id).disabled = !compatible;
+        if (!compatible) {
+            stopPick();
+            console.warn("[" + PLUGIN_NAME + "] missing in the planets.nu client:", missing);
+        }
+        return compatible;
+    }
+
     function resetForGame() {
+        if (!checkCompatibility()) return;
         loadSimulations();
         fillTorpedoes();
         panel.querySelector("#mfs-max").value = String(defaultMaxUnits());
@@ -376,7 +553,9 @@
 #mfs-panel .mfs-item span:nth-child(2) { flex: 1; }
 #mfs-panel .mfs-item button { padding: 0 5px; }
 #mfs-panel .mfs-swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+#mfs-panel button:disabled { opacity: 0.4; cursor: default; }
 #mfs-message { color: #ff7b7b; min-height: 14px; }
+#mfs-compat { display: none; color: #ff7b7b; border: 1px solid #ff7b7b; border-radius: 3px; padding: 4px; margin-bottom: 8px; }
 `;
         document.head.appendChild(style);
 
@@ -390,6 +569,7 @@
         panel.id = "mfs-panel";
         panel.innerHTML = `
 <h3>Minefield simulation</h3>
+<div id="mfs-compat"></div>
 <div class="mfs-section">
   <div class="mfs-label">Location: <b id="mfs-location">none</b></div>
   <button id="mfs-pick">Pick on map</button>
@@ -439,13 +619,13 @@
         toggle.addEventListener("click", () => {
             const open = panel.style.display !== "block";
             panel.style.display = open ? "block" : "none";
-            if (open && gameReady()) {
+            if (open && compatible && game.ready()) {
                 fillTorpedoes();
                 renderFieldChoice();
             }
             if (!open) stopPick();
         });
-        panel.querySelector("#mfs-pick").addEventListener("click", () => (pickMode ? stopPick() : startPick()));
+        panel.querySelector("#mfs-pick").addEventListener("click", () => (pick === "armed" ? stopPick() : startPick()));
         panel.querySelector("#mfs-loc-set").addEventListener("click", locationFromInputs);
         panel.querySelector("#mfs-loc-value").addEventListener("keydown", (e) => {
             if (e.key === "Enter") locationFromInputs();
@@ -478,7 +658,7 @@
     // ---------- start ----------
 
     function init() {
-        if (typeof vgap === "undefined" || typeof vgap.registerPlugin !== "function") {
+        if (!game.loaded()) {
             setTimeout(init, 500);
             return;
         }
@@ -486,16 +666,16 @@
         let loadedGame = null;
 
         const onGameShown = () => {
-            if (!gameReady()) return;
+            if (!game.ready()) return;
             toggle.style.display = "block";
-            const gameId = vgap.game && vgap.game.id;
+            const gameId = game.gameId();
             if (gameId !== loadedGame) {
                 loadedGame = gameId;
                 resetForGame();
             }
         };
 
-        vgap.registerPlugin({
+        game.registerPlugin({
             processload: onGameShown,
             loadmap: onGameShown,
             showmap: onGameShown,
